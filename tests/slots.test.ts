@@ -1,8 +1,8 @@
-const test = require('node:test');
-const assert = require('node:assert');
-const { calcolaSlot, analizzaAbitudini, eventiToOccupati, trovaServizio, localToUtcMs } = require('../src/lib.js');
+import { test } from 'vitest';
+import assert from 'node:assert';
+import { calcolaSlot, analizzaAbitudini, eventiToOccupati, trovaServizio, localToUtcMs, type Orari } from '../lib/slots';
 
-const orari = {
+const orari: Orari = {
   lunedi: [], martedi: [['09:00', '13:00'], ['15:00', '19:00']], mercoledi: [['09:00', '13:00'], ['15:00', '19:00']],
   giovedi: [['09:00', '13:00'], ['15:00', '19:00']], venerdi: [['09:00', '13:00'], ['15:00', '19:00']],
   sabato: [['09:00', '17:00']], domenica: [],
@@ -22,7 +22,7 @@ test('restituisce 3 slot su giorni diversi, mai in giorni di chiusura', () => {
 test('rispetta preferenza giorno e fascia', () => {
   const r = calcolaSlot({ ...base, preferenze: { giorni: ['sabato'], fascia: 'mattina' } });
   assert.ok(r[0].etichetta.startsWith('sabato') || r.some((s) => s.etichetta.startsWith('sabato')));
-  const sab = r.find((s) => s.etichetta.startsWith('sabato'));
+  const sab = r.find((s) => s.etichetta.startsWith('sabato'))!;
   assert.ok(sab.inizio.includes('T09:00') || sab.inizio.includes('T1')); // mattina
 });
 
@@ -69,13 +69,13 @@ test('abitudini da storico', () => {
   assert.strictEqual(ab.giornoAbituale, 'sabato');
   assert.strictEqual(ab.fasciaAbituale, 'mattina');
   assert.strictEqual(ab.servizioAbituale, 'Taglio e piega');
-  assert.ok(ab.cadenzaSettimane > 4 && ab.cadenzaSettimane < 6);
+  assert.ok(ab.n > 0 && ab.cadenzaSettimane! > 4 && ab.cadenzaSettimane! < 6);
   assert.deepStrictEqual(analizzaAbitudini([]), { n: 0 });
 });
 
 test('trovaServizio e match approssimato', () => {
   const s = [{ nome: 'Taglio' }, { nome: 'Colore' }, { nome: 'Piega' }];
-  assert.strictEqual(trovaServizio('colore', s).nome, 'Colore');
-  assert.strictEqual(trovaServizio('vorrei fare un taglio', s).nome, 'Taglio');
+  assert.strictEqual(trovaServizio('colore', s)!.nome, 'Colore');
+  assert.strictEqual(trovaServizio('vorrei fare un taglio', s)!.nome, 'Taglio');
   assert.strictEqual(trovaServizio('keratina', s), null);
 });

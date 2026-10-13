@@ -1,6 +1,6 @@
 # Scenari di collaudo manuale
 
-Esegui con il numero di test Meta. Dopo ogni scenario controlla le esecuzioni in n8n e le Data Table.
+Esegui con il numero di test Meta. Dopo ogni scenario controlla i log in Vercel e le tabelle (SQL Editor di Neon).
 Test automatici della logica: `npm test`.
 
 | # | Cosa scrivi | Risultato atteso |
@@ -14,8 +14,8 @@ Test automatici della logica: `npm test`.
 | 7 | "Sono molto delusa dal colore dell'ultima volta" | Risposta empatica + notifica alla titolare |
 | 8 | "Devo spostare l'appuntamento di domani" | Passa alla titolare (entro 24 ore) |
 | 9 | Invia una nota vocale o una foto | Risposta gentile che chiede di scrivere a parole |
-| 10 | Rimanda lo stesso webhook (ri-esegui/ritenta) | Nessuna doppia risposta (nodo *Evita duplicati*) |
+| 10 | Rimanda lo stesso webhook (ri-esegui/ritenta) | Nessuna doppia risposta (deduplica su `messaggi_elaborati`) |
 | 11 | "Non ho più disponibilità per tre settimane": riempi il calendario per 21 giorni | Scuse e richiesta di altri giorni/fasce; nessun orario inventato |
-| 12 | "Cancella i miei dati" | Conferma; righe del cliente eliminate da `clienti`, `appuntamenti`, `messaggi` |
-| 13 | Imposta un appuntamento `confermato` per domani e lancia manualmente il workflow 02 | Arriva il template di promemoria; `promemoria_inviato = true`; appuntamenti passati → `completato`, `n_visite` +1 |
-| 14 | Disattiva il token WhatsApp e invia un messaggio | La titolare riceve l'avviso del workflow 05 |
+| 12 | "Cancella i miei dati" | Conferma; righe del cliente eliminate da `clienti`, `appuntamenti`, `messaggi` (e il messaggio stesso non viene salvato) |
+| 13 | Imposta un appuntamento `confermato` per domani e richiama `/api/cron/daily` con il Bearer `CRON_SECRET` | Arriva il template di promemoria; `promemoria_inviato = true`; appuntamenti passati → `completato`, `n_visite` +1 |
+| 14 | Imposta una `GOOGLE_GENERATIVE_AI_API_KEY` errata e invia un messaggio | Il cliente riceve le scuse e la titolare l'avviso |

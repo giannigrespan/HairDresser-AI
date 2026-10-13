@@ -1,12 +1,36 @@
 {
   "name": "hairdresser-ai",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Assistente WhatsApp per salone di parrucchiera (n8n + Gemini + Google Calendar)",
+  "type": "module",
+  "description": "Assistente WhatsApp per salone di parrucchiera (Next.js su Vercel + Gemini + Google Calendar + Neon)",
   "scripts": {
-    "build": "node scripts/build_workflows.js",
-    "validate": "node scripts/validate_workflows.js",
-    "test": "node --test tests/lib.test.js tests/workflow_nodes.test.js",
-    "configure": "node scripts/configure.js"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "tsx scripts/migrate.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^4.0.94",
+    "@neondatabase/serverless": "^1.2.0",
+    "ai": "^7.0.138",
+    "drizzle-orm": "^0.45.4",
+    "googleapis": "^185.0.0",
+    "next": "^16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
   }
 }
