@@ -1,0 +1,12 @@
+{
+  "name": "hairdresser-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Assistente WhatsApp per salone di parrucchiera (n8n + Gemini + Google Calendar)",
+  "scripts": {
+    "build": "node scripts/build_workflows.js",
+    "validate": "node scripts/validate_workflows.js",
+    "test": "node --test tests/lib.test.js tests/workflow_nodes.test.js",
+    "configure": "node scripts/configure.js"
+  }
+}

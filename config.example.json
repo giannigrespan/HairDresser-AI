@@ -1,0 +1,15 @@
+{
+  "phone_number_id": "ID del numero WhatsApp (Meta > WhatsApp > API Setup)",
+  "tabelle": {
+    "clienti": "ID Data Table",
+    "appuntamenti": "ID Data Table",
+    "messaggi": "ID Data Table",
+    "servizi": "ID Data Table",
+    "impostazioni": "ID Data Table"
+  },
+  "workflow": {
+    "slot": "ID del workflow 03 dopo l'import",
+    "azioni": "ID del workflow 04 dopo l'import",
+    "errori": "ID del workflow 05 dopo l'import"
+  }
+}

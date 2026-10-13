@@ -1,0 +1,995 @@
+{
+  "name": "Salone - 04 Azioni agente",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "azione"
+            },
+            {
+              "name": "telefono"
+            },
+            {
+              "name": "nome"
+            },
+            {
+              "name": "opzione"
+            },
+            {
+              "name": "chiave"
+            },
+            {
+              "name": "valore"
+            },
+            {
+              "name": "motivo"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000063",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_IMPOSTAZIONI__"
+        },
+        "returnAll": true
+      },
+      "id": "00000000-0000-4000-8000-000000000064",
+      "name": "Impostazioni",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        220,
+        500
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst rows = $input.all().map((i) => i.json);\nconst kv = {};\nfor (const r of rows) if (r.chiave) kv[r.chiave] = r.valore;\nconst j = (s, d) => { try { return JSON.parse(s); } catch (e) { return d; } };\nconst config = {\n  nome_salone: kv.nome_salone || 'il nostro salone',\n  id_calendario: kv.id_calendario,\n  orari: j(kv.orari, {}),\n  giorni_chiusura: j(kv.giorni_chiusura, []),\n  anticipo_min: Number(kv.anticipo_min || 120),\n  orizzonte_giorni: Number(kv.orizzonte_giorni || 21),\n  passo_min: Number(kv.passo_min || 30),\n  telefono_titolare: kv.telefono_titolare,\n};\nif (!config.id_calendario) throw new Error(\"Impostazione 'id_calendario' mancante nella tabella impostazioni\");\nreturn [{ json: { ...$('Trigger').first().json, config } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000065",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "00000000-0000-4000-8000-000000000066",
+                    "leftValue": "={{ $json.azione }}",
+                    "rightValue": "prenota",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "prenota"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "00000000-0000-4000-8000-000000000067",
+                    "leftValue": "={{ $json.azione }}",
+                    "rightValue": "salva_preferenza",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "salva_preferenza"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "00000000-0000-4000-8000-000000000068",
+                    "leftValue": "={{ $json.azione }}",
+                    "rightValue": "escalation",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "escalation"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "00000000-0000-4000-8000-000000000069",
+                    "leftValue": "={{ $json.azione }}",
+                    "rightValue": "cancella_dati",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cancella_dati"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000070",
+      "name": "Azione",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        660,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_APPUNTAMENTI__"
+        },
+        "returnAll": true,
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $json.telefono }}"
+            },
+            {
+              "keyName": "stato",
+              "condition": "eq",
+              "keyValue": "proposto"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000071",
+      "name": "Proposte",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        900,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst inp = $('Config').first().json;\nconst righe = $input.all().map((i) => i.json).filter((r) => r.id && r.stato === 'proposto');\nconst r = righe.find((x) => Number(x.opzione) === Number(inp.opzione));\nif (!r) return [{ json: { ok: false, motivo: 'opzione_non_valida_o_proposte_scadute' } }];\nconst inizio = new Date(r.inizio); const fine = new Date(r.fine);\nif (inizio.getTime() < Date.now()) return [{ json: { ok: false, motivo: 'slot_scaduto' } }];\nreturn [{ json: { ok: true, riga: { id: r.id, servizio: r.servizio, inizio: inizio.toISOString(), fine: fine.toISOString() }, config: inp.config, input: { telefono: inp.telefono, nome: inp.nome } } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000072",
+      "name": "Scegli proposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000073",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000074",
+      "name": "Proposta valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1340,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.config.id_calendario }}"
+        },
+        "returnAll": true,
+        "timeMin": "={{ $json.riga.inizio }}",
+        "timeMax": "={{ $json.riga.fine }}",
+        "options": {
+          "singleEvents": true
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000075",
+      "name": "Verifica libero",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1560,
+        -80
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst d = $('Scegli proposta').first().json;\nconst ev = $input.all().map((i) => i.json).filter((e) => e && e.id);\nconst s = Date.parse(d.riga.inizio); const f = Date.parse(d.riga.fine);\nconst occupato = eventiToOccupati(ev).some((o) => s < o.end && f > o.start);\nreturn [{ json: { ...d, libero: !occupato } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000076",
+      "name": "Libero?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000077",
+              "leftValue": "={{ $json.libero }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000078",
+      "name": "Ancora libero?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2000,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.config.id_calendario }}"
+        },
+        "start": "={{ $json.riga.inizio }}",
+        "end": "={{ $json.riga.fine }}",
+        "additionalFields": {
+          "summary": "={{ $json.riga.servizio + ' - ' + ($json.input.nome || $json.input.telefono) }}",
+          "description": "={{ 'Prenotato via WhatsApp\\nCliente: ' + ($json.input.nome || '') + '\\nTelefono: ' + $json.input.telefono }}"
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000079",
+      "name": "Crea evento",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        2220,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_APPUNTAMENTI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Libero?').first().json.riga.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stato": "confermato",
+            "event_id": "={{ $json.id }}",
+            "nome_cliente": "={{ $('Libero?').first().json.input.nome }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000080",
+      "name": "Conferma riga",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        2440,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_APPUNTAMENTI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $('Libero?').first().json.input.telefono }}"
+            },
+            {
+              "keyName": "stato",
+              "condition": "eq",
+              "keyValue": "proposto"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000081",
+      "name": "Pulisci proposte",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        2660,
+        -160
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst d = $('Libero?').first().json;\nreturn [{ json: { ok: true, servizio: d.riga.servizio, quando: etichetta(Date.parse(d.riga.inizio)), istruzione: \"Conferma al cliente giorno, ora e servizio, ringrazia con calore.\" } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000082",
+      "name": "Esito prenotazione",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        -160
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nlet motivo = 'slot_occupato';\ntry { const s = $('Scegli proposta').first().json; if (s.ok === false) motivo = s.motivo; } catch (e) {}\nreturn [{ json: { ok: false, motivo, istruzione: 'Scusati e richiama proponi_slot per offrire nuove opzioni.' } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000083",
+      "name": "Esito errore prenotazione",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        60
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst inp = $input.first().json;\nconst consentite = ['nome', 'giorni_preferiti', 'fascia_preferita', 'stilista_preferito', 'note', 'consenso_dati'];\nif (!consentite.includes(inp.chiave)) return [{ json: { errore: 'chiave_non_ammessa', chiavi_ammesse: consentite } }];\nlet v = inp.valore;\nif (inp.chiave === 'consenso_dati') v = /^(true|si|sì|1|yes)$/i.test(String(v));\nreturn [{ json: { telefono: inp.telefono, [inp.chiave]: v } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000084",
+      "name": "Prepara preferenza",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "00000000-0000-4000-8000-000000000085",
+              "leftValue": "={{ !!$json.telefono }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00000000-0000-4000-8000-000000000086",
+      "name": "Preferenza valida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_CLIENTI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $json.telefono }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000087",
+      "name": "Aggiorna cliente",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst p = $('Prepara preferenza').first().json;\nreturn [{ json: p.errore ? { ok: false, ...p } : { ok: true, istruzione: 'Preferenza salvata: non serve dirlo al cliente se non e naturale.' } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000088",
+      "name": "Esito preferenza",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        300
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nconst d = $input.first().json;\nconst pulisci = (s) => String(s || '').replace(/[\\n\\r\\t]+/g, ' ').replace(/ {2,}/g, ' ').trim().slice(0, 300);\nreturn [{ json: { a: String(d.config.telefono_titolare || '').replace('+', ''), cliente: pulisci((d.nome || 'Cliente') + ' (' + d.telefono + ')'), motivo: pulisci(d.motivo) } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000089",
+      "name": "Prepara notifica",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendTemplate",
+        "phoneNumberId": "__PHONE_NUMBER_ID__",
+        "recipientPhoneNumber": "={{ $json.a }}",
+        "template": "notifica_titolare|it",
+        "components": {
+          "component": [
+            {
+              "type": "body",
+              "bodyParameters": {
+                "parameter": [
+                  {
+                    "type": "text",
+                    "text": "={{ $json.cliente }}"
+                  },
+                  {
+                    "type": "text",
+                    "text": "={{ $json.motivo }}"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000090",
+      "name": "Notifica titolare",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nreturn [{ json: { ok: true, istruzione: 'Titolare avvisata. Rassicura il cliente: sara ricontattato il prima possibile.' } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000091",
+      "name": "Esito escalation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        560
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_MESSAGGI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $('Config').first().json.telefono }}"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000092",
+      "name": "Cancella messaggi",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        900,
+        800
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_APPUNTAMENTI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $('Config').first().json.telefono }}"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000093",
+      "name": "Cancella appuntamenti",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        800
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__ID_TABELLA_CLIENTI__"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "telefono",
+              "condition": "eq",
+              "keyValue": "={{ $('Config').first().json.telefono }}"
+            }
+          ]
+        }
+      },
+      "id": "00000000-0000-4000-8000-000000000094",
+      "name": "Cancella cliente",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        800
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Logica pura (senza dipendenze) usata dai nodi Code di n8n.\n// Viene testata con `node --test` e incorporata nei workflow da scripts/build_workflows.js.\n// Le funzioni sono volutamente autonome: i nodi Code di n8n non possono fare require di file locali.\n\nconst TZ = 'Europe/Rome';\nconst GIORNI = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'];\n\nfunction tzOffsetMin(date, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(date).map((x) => [x.type, x.value]),\n  );\n  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);\n  return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);\n}\n\n// Ora \"a muro\" nel fuso indicato -> millisecondi UTC (gestisce l'ora legale).\nfunction localToUtcMs(y, m, d, hh, mm, tz) {\n  const guess = Date.UTC(y, m - 1, d, hh, mm);\n  let ms = guess - tzOffsetMin(new Date(guess), tz) * 60000;\n  const off2 = tzOffsetMin(new Date(ms), tz);\n  ms = guess - off2 * 60000;\n  return ms;\n}\n\n// Data locale (YYYY-MM-DD) di un istante UTC.\nfunction localDateStr(ms, tz) {\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })\n      .formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}`;\n}\n\nfunction etichetta(ms, tz) {\n  const giorno = new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' }).format(new Date(ms));\n  const ora = new Intl.DateTimeFormat('it-IT', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));\n  return `${giorno} alle ${ora}`;\n}\n\nfunction isoLocale(ms, tz) {\n  const off = tzOffsetMin(new Date(ms), tz);\n  const sign = off >= 0 ? '+' : '-';\n  const a = Math.abs(off);\n  const hhmm = `${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;\n  const p = Object.fromEntries(\n    new Intl.DateTimeFormat('en-CA', {\n      timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',\n      hour: '2-digit', minute: '2-digit', second: '2-digit',\n    }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]),\n  );\n  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${sign}${hhmm}`;\n}\n\nfunction parseHM(s) {\n  const [h, m] = String(s).split(':').map(Number);\n  return h * 60 + (m || 0);\n}\n\n// Converte gli eventi Google Calendar in intervalli occupati [startMs, endMs].\nfunction eventiToOccupati(eventi, tz = TZ) {\n  const out = [];\n  for (const e of eventi || []) {\n    if (!e || e.status === 'cancelled' || e.transparency === 'transparent') continue;\n    // Il nodo Calendar puo' restituire {dateTime}/{date} oppure stringhe semplificate.\n    const norm = (v) => (typeof v === 'string' ? (v.length === 10 ? { date: v } : { dateTime: v }) : v || {});\n    const s = norm(e.start);\n    const f = norm(e.end);\n    if (s.dateTime && f.dateTime) {\n      out.push({ start: Date.parse(s.dateTime), end: Date.parse(f.dateTime) });\n    } else if (s.date) {\n      // Evento \"tutto il giorno\": blocca l'intera giornata locale.\n      const [y, m, d] = s.date.split('-').map(Number);\n      const [y2, m2, d2] = (f.date || s.date).split('-').map(Number);\n      out.push({\n        start: localToUtcMs(y, m, d, 0, 0, tz),\n        end: localToUtcMs(y2, m2, d2, 0, 0, tz) + (f.date ? 0 : 24 * 3600000),\n      });\n    }\n  }\n  return out;\n}\n\n/**\n * Calcola fino a 3 slot liberi.\n * @param {object} p\n *  now (ms UTC), durataMin, bufferMin, orari {lunedi:[[\"09:00\",\"13:00\"],[\"15:00\",\"19:00\"]], domenica:[]},\n *  giorniChiusura ['YYYY-MM-DD'], occupati [{start,end}], preferenze {giorni:['sabato'], fascia:'mattina'|'pomeriggio'},\n *  anticipoMin, orizzonteGiorni, passoMin, tz, n\n */\nfunction calcolaSlot(p) {\n  const tz = p.tz || TZ;\n  const n = p.n || 3;\n  const passo = p.passoMin || 30;\n  const durata = p.durataMin + (p.bufferMin || 0);\n  const anticipo = (p.anticipoMin ?? 120) * 60000;\n  const orizzonte = p.orizzonteGiorni || 21;\n  const chiusi = new Set(p.giorniChiusura || []);\n  const pref = p.preferenze || {};\n  const prefGiorni = (pref.giorni || []).map((g) => g.toLowerCase());\n  const occupati = p.occupati || [];\n\n  const oggi = localDateStr(p.now, tz);\n  const [y0, m0, d0] = oggi.split('-').map(Number);\n  const giorni = []; // { data, slot: [{start,end,score}] }\n\n  for (let i = 0; i <= orizzonte; i++) {\n    const base = new Date(Date.UTC(y0, m0 - 1, d0 + i));\n    const y = base.getUTCFullYear(); const m = base.getUTCMonth() + 1; const d = base.getUTCDate();\n    const dataStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n    if (chiusi.has(dataStr)) continue;\n    const nomeGiorno = GIORNI[base.getUTCDay()];\n    const fasce = (p.orari || {})[nomeGiorno] || [];\n    const candidati = [];\n    for (const [apre, chiude] of fasce) {\n      for (let t = parseHM(apre); t + durata <= parseHM(chiude); t += passo) {\n        const start = localToUtcMs(y, m, d, Math.floor(t / 60), t % 60, tz);\n        const end = start + durata * 60000;\n        if (start < p.now + anticipo) continue;\n        if (occupati.some((o) => start < o.end && end > o.start)) continue;\n        let score = 0;\n        if (prefGiorni.includes(nomeGiorno)) score += 2;\n        if (pref.fascia === 'mattina' && t < 13 * 60) score += 2;\n        if (pref.fascia === 'pomeriggio' && t >= 13 * 60) score += 2;\n        score -= i * 0.05; // a parita' di preferenze, meglio prima\n        candidati.push({ start, end: start + p.durataMin * 60000, score });\n      }\n    }\n    if (candidati.length) giorni.push({ data: dataStr, slot: candidati.sort((a, b) => b.score - a.score || a.start - b.start) });\n  }\n\n  // 1) il miglior slot di ciascun giorno, poi i giorni migliori\n  const scelti = giorni\n    .map((g) => g.slot[0])\n    .sort((a, b) => b.score - a.score || a.start - b.start)\n    .slice(0, n);\n\n  // 2) se i giorni disponibili sono meno di n, riempi con altri orari (distanza minima 2h dagli scelti)\n  if (scelti.length < n) {\n    const extra = giorni.flatMap((g) => g.slot.slice(1))\n      .sort((a, b) => b.score - a.score || a.start - b.start);\n    for (const c of extra) {\n      if (scelti.length >= n) break;\n      if (scelti.every((s) => Math.abs(s.start - c.start) >= 2 * 3600000)) scelti.push(c);\n    }\n  }\n\n  return scelti.sort((a, b) => a.start - b.start).map((s, i) => ({\n    n: i + 1,\n    inizio: isoLocale(s.start, tz),\n    fine: isoLocale(s.end, tz),\n    etichetta: etichetta(s.start, tz),\n  }));\n}\n\n// Dallo storico appuntamenti deduce giorno/fascia preferiti e cadenza media.\nfunction analizzaAbitudini(appuntamenti, tz = TZ) {\n  const validi = (appuntamenti || [])\n    .filter((a) => a && a.inizio && ['completato', 'confermato'].includes(a.stato))\n    .map((a) => ({ ...a, ms: Date.parse(a.inizio) }))\n    .filter((a) => !Number.isNaN(a.ms))\n    .sort((a, b) => a.ms - b.ms);\n  if (!validi.length) return { n: 0 };\n\n  const conta = (arr) => arr.reduce((acc, k) => ((acc[k] = (acc[k] || 0) + 1), acc), {});\n  const top = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1])[0];\n\n  const giorni = validi.map((a) => new Intl.DateTimeFormat('it-IT', { timeZone: tz, weekday: 'long' }).format(new Date(a.ms)));\n  const fasce = validi.map((a) => {\n    const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(a.ms)));\n    return h < 13 ? 'mattina' : 'pomeriggio';\n  });\n  const servizi = conta(validi.map((a) => a.servizio));\n\n  let cadenzaSettimane = null;\n  if (validi.length >= 2) {\n    const gap = [];\n    for (let i = 1; i < validi.length; i++) gap.push((validi[i].ms - validi[i - 1].ms) / (7 * 86400000));\n    cadenzaSettimane = Math.round((gap.reduce((a, b) => a + b, 0) / gap.length) * 10) / 10;\n  }\n  const [gTop, gN] = top(conta(giorni));\n  const [fTop] = top(conta(fasce));\n  const [sTop] = top(servizi);\n  const ultimo = validi[validi.length - 1];\n  return {\n    n: validi.length,\n    giornoAbituale: gN >= 2 || validi.length === 1 ? gTop : null,\n    fasciaAbituale: fTop,\n    servizioAbituale: sTop,\n    cadenzaSettimane,\n    ultimoServizio: ultimo.servizio,\n    ultimaData: etichetta(ultimo.ms, tz),\n  };\n}\n\nfunction trovaServizio(nomeRichiesto, servizi) {\n  const q = String(nomeRichiesto || '').toLowerCase().trim();\n  const lista = servizi || [];\n  return (\n    lista.find((s) => String(s.nome).toLowerCase() === q) ||\n    lista.find((s) => String(s.nome).toLowerCase().includes(q) && q) ||\n    lista.find((s) => q.includes(String(s.nome).toLowerCase())) ||\n    null\n  );\n}\n\n\n// ---- nodo ----\nreturn [{ json: { ok: true, istruzione: 'Conferma al cliente che i suoi dati sono stati cancellati. Non chiamare altri strumenti per lui.' } }];"
+      },
+      "id": "00000000-0000-4000-8000-000000000095",
+      "name": "Esito cancellazione",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        800
+      ],
+      "executeOnce": true
+    }
+  ],
+  "pipeData": {},
+  "connections": {
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Azione",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Azione": {
+      "main": [
+        [
+          {
+            "node": "Proposte",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepara preferenza",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepara notifica",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancella messaggi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proposte": {
+      "main": [
+        [
+          {
+            "node": "Scegli proposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scegli proposta": {
+      "main": [
+        [
+          {
+            "node": "Proposta valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proposta valida?": {
+      "main": [
+        [
+          {
+            "node": "Verifica libero",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Esito errore prenotazione",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verifica libero": {
+      "main": [
+        [
+          {
+            "node": "Libero?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Libero?": {
+      "main": [
+        [
+          {
+            "node": "Ancora libero?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ancora libero?": {
+      "main": [
+        [
+          {
+            "node": "Crea evento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Esito errore prenotazione",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crea evento": {
+      "main": [
+        [
+          {
+            "node": "Conferma riga",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferma riga": {
+      "main": [
+        [
+          {
+            "node": "Pulisci proposte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pulisci proposte": {
+      "main": [
+        [
+          {
+            "node": "Esito prenotazione",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepara preferenza": {
+      "main": [
+        [
+          {
+            "node": "Preferenza valida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preferenza valida?": {
+      "main": [
+        [
+          {
+            "node": "Aggiorna cliente",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Esito preferenza",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggiorna cliente": {
+      "main": [
+        [
+          {
+            "node": "Esito preferenza",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepara notifica": {
+      "main": [
+        [
+          {
+            "node": "Notifica titolare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notifica titolare": {
+      "main": [
+        [
+          {
+            "node": "Esito escalation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancella messaggi": {
+      "main": [
+        [
+          {
+            "node": "Cancella appuntamenti",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancella appuntamenti": {
+      "main": [
+        [
+          {
+            "node": "Cancella cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancella cliente": {
+      "main": [
+        [
+          {
+            "node": "Esito cancellazione",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Rome"
+  },
+  "tags": []
+}
